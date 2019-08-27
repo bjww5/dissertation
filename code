@@ -1,0 +1,729 @@
+#-------------------------------------------------------------------------------
+from netCDF4 import Dataset
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+from scipy import stats
+from scipy import signal
+from decimal import Decimal
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import scipy.fftpack
+from matplotlib.patches import Rectangle
+import xesmf as xe
+from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
+import matplotlib.ticker as mticker
+import pywt 
+import warnings
+warnings.filterwarnings("ignore")
+import pandas as pd
+from eofs.standard import Eof
+from matplotlib import colors as c
+
+# Import MOC (decadally averaged) data
+moc_data = Dataset(***)
+temp_data = Dataset(***)
+# xarray
+temp_data_xr = xr.open_dataset(***)
+moc_data_xr = xr.open_dataset(***)
+
+#-------------------------------------------------------------------------------
+lons_xr = temp_data_xr.TLONG.values
+lats_xr = temp_data_xr.TLAT.values
+tarea = temp_data_xr.TAREA.values #area of grid cells
+time_var = temp_data.variables['time']
+
+sst_array = temp_data_xr.TEMP[:, 0, :, :].values #SST
+tsub_array = temp_data_xr.TEMP[:, 13, :, :].values #Tsub, ~400 m
+temp_xr = temp_data_xr.TEMP[:, 0, :, :] #with metadata 
+
+moc_array1 = moc_data_xr.MOC[:, 1, 0, 14:, 72:].max(axis=(1,2)).values #north of 28deg 
+moc_array2 = moc_data_xr.MOC[:, 1, 0, 14:, 76:86].max(axis=(1,2)).values #40-60 deg N
+moc_array3 = moc_data_xr.MOC[:, 1, 0, 14:, 71:75].max(axis=(1,2)).values #27-32 deg N
+
+title_list = ['LGM', 'HS1', 'BA', 'YD', 'EMH', 'LH']
+letter_list = ['a', 'b', 'c', 'd', 'e', 'f']
+
+#-------------------------------------------------------------------------------
+def var_coords(var, min_lat, max_lat, min_lon, max_lon, verbose):
+    
+    '''
+    This code was written by Damian Oyarzun Valenzuela. PhD candidate, 
+    Geography UCL, 2017.
+    
+    
+    
+    Parameters
+    -----------
+    var: either temp or lat/lon variable.
+    min_lat: minimum latitude (degrees N).
+    max_lat: maximum latitude (degrees N).
+    min_lon: minimum longitude (degrees E).
+    max_lon: maximum longitude (degrees E).
+        
+    Returns
+    -------
+    var_ai: temperatures in a specific lat-lon region for all depths 
+    & for all times.
+    mean_temp: the average of temperatures in a specific lat-lon region
+    for all depths & for all times.
+    
+    '''
+    
+    # min lat, max lat, min lon, max lon.
+    area = [min_lat, max_lat, min_lon, max_lon]  
+
+    lat = temp_data.variables['TLAT'][:]
+    lon = temp_data.variables['TLONG'][:]
+
+    # Physical coordinates
+    ll = [lat,lon]
+    # Logical coordinates
+    nn = ['nlat','nlon']
+    
+    # Specify area of interest as lat-lon degrees
+    # Produces boolean array (shape 116, 100)
+    latt = np.logical_and(lat >= area[0], lat <= area[1])
+    lonn = np.logical_and(lon >= area[2], lon <= area[3])
+
+    # Select area of interest from combination of lat-lon arrays
+    # Produces boolean array (shape 116, 100)
+    a_int = latt * lonn 
+
+    # Indices for area of interest
+    # nonzero returns indices of elements that are non-zero (True)
+    # Shape = (20,) (20,)
+    (ii,jj) = a_int.nonzero()
+
+    # Apply indices to select variable data
+    # temp over area of interest, all times
+    if verbose: 
+        var_ai = var[:, ii.min():ii.max(),jj.min():jj.max()] \
+                     *a_int[ii.min():ii.max(),jj.min():jj.max()]
+    
+    # coords over area of interest
+    else:
+        var_ai = var[ii.min():ii.max(),jj.min():jj.max()] \
+                     *a_int[ii.min():ii.max(),jj.min():jj.max()]
+        
+    print("Shape of var_ai: ", var_ai.shape)
+    
+    # Boolean array, temp*AOI, temp over AOI only  
+    if verbose: 
+        vvv = [a_int, var[0,:,:]*a_int, var_ai[0,:,:]]
+        
+    # Boolean array, coord*AOI, coords over AOI only 
+    else:
+        vvv = [a_int, var[:,:]*a_int, var_ai[:,:]]
+    
+    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(10, 2))
+    for vv,ax in zip(vvv,axes.flat):
+        im = ax.imshow(vv, origin=(20,10))   
+        
+    fig.colorbar(im)
+
+    # MY CODE - Take mean of temperature over axes 2 & 3 (area)
+    if verbose:
+        mean_temp = np.nanmean(var_ai, axis=(1,2)) 
+        print("Shape of mean_temp: ", mean_temp.shape)
+        return var_ai, mean_temp
+    
+    else:
+        return var_ai
+        
+#-------------------------------------------------------------------------------        
+def patches(ax, num, var, dividor, multiple_plots):
+    
+    '''
+    Plots rectangles over a time series to show key climate periods,
+    adds an annotated label for each period.
+    
+    Parameters
+    -----------
+    ax: the axis.
+    num: the plot number.
+    var: variable of interest.
+    dividor: a number to get the labels above the plots.
+
+    Returns
+    -------
+    Nothing
+
+    '''
+
+    x_starts = [-22, -19, -14.6, -12.9, -11.7, -4]
+    y_start = min(var)
+    widths = [3, 4.4, 1.7, 1.2, 7.7, 4]
+    height = max(var) - min(var)
+    colors = ['deepskyblue', 'cyan', 'red', 'dodgerblue', 'gold', 'darkorange']
+
+    for x_start, width, color, title in zip(x_starts, widths, colors, title_list):
+        ax.add_patch(Rectangle((x_start, y_start), width, height, fc=color, alpha=0.15))   
+
+        # Annotate
+        if multiple_plots==True:
+            if num==1:
+                ax.text((x_start+width/2.5), 
+                        (np.median(var)+np.median(var)/dividor), 
+                        title, color='dimgray')
+        else:
+            ax.text((x_start+width/2.5), 
+                    (np.median(var)+np.median(var)/dividor), 
+                    title, color='dimgray')
+#-------------------------------------------------------------------------------                   
+# Full time series
+sst_means = [mean_sst, mean_sst_wh]
+tsub_means = [mean_tsub, mean_tsub_wh]
+
+def multi_timeseries(variables, label, dividor):
+    
+    '''
+    Plots a full time series for a list of variables.
+    
+    Parameters
+    -----------
+    variables: a list of variables.
+    label: y-axis label (string).
+    dividor: a number to get the labels above the plots.
+
+    Returns
+    -------
+    Nothing
+
+    '''
+    
+    fig = plt.figure(figsize=(10, 4.5))
+
+    for var, letter, num in zip(variables, 
+                                letter_list, 
+                                range(1,3)):
+
+        ax = fig.add_subplot(2, 1, num)
+        plt.plot(time_var[:], var, color='k')
+        plt.title(letter, loc='left', fontweight='bold', fontsize='large')
+        if num==2:
+            plt.xlabel('Time [ka]')
+        else:
+            plt.xticks([])
+            
+        patches(ax, num, var, dividor, multiple_plots=True)
+            
+        plt.ylabel(label)
+        plt.rcParams.update({'font.size': 12})
+
+#-------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+def auto(var1, var2, N):
+    
+    '''
+    Calculates the lag-1 autocorrelation of a variable & estimates the number
+    of independent values in a series of correlated values.
+    
+    Parameters
+    -----------
+    var1: variable 1
+    var2: variable 2
+    N: the length of the time series.
+    
+    Returns
+    -------
+    Neqv: effective DOF (float)
+    
+    '''
+    
+    #-----calculate lag-one autocorrelation (r1) 
+    x1=var1[1:-1]
+    y1=var1[2:]
+    
+    x2=var2[1:-1] 
+    y2=var2[2:]
+    
+    # corrcoef: matrix of correlations of x with x, x with y, y with x and y with y
+    r1 = np.corrcoef(x1, y1)[0,1] # x with y 
+    r2 = np.corrcoef(x2, y2)[0,1]
+
+    #-----estimate equivalent N
+    Neqv = N*((1-(r1*r2)/(1+(r1*r2)))) #N = length of data 
+    
+    return Neqv
+
+
+#-------------------------------------------------------------------------------
+def time_arrays(time_var, start):
+    time_all = time_var[start:2205]
+    time_LGM = time_var[start:300]
+    time_H1 = time_var[300:750]
+    time_BA = time_var[750:900]
+    time_YD = time_var[900:1030]
+    time_EMH = time_var[1030:1800]
+    time_LH = time_var[1800:2205]
+    return time_all, time_LGM, time_H1, time_BA, time_YD, time_EMH, time_LH
+
+times = time_arrays(time_var, 0) #time variable
+
+def temp_arrays(temp_array, start):
+    temp_all = temp_array[start:2205]
+    temp_LGM = temp_array[start:300]
+    temp_H1 = temp_array[300:750]
+    temp_BA = temp_array[750:900]
+    temp_YD = temp_array[900:1030]
+    temp_EMH = temp_array[1030:1800]
+    temp_LH = temp_array[1800:2205]
+    return temp_all, temp_LGM, temp_H1, temp_BA, temp_YD, temp_EMH, temp_LH
+
+ssts = temp_arrays(mean_sst, 0) #NA index SST
+ssts_wh = temp_arrays(mean_sst_wh, 0) #WH index SST
+tsubs = temp_arrays(mean_tsub, 0) #NA index Tsub
+tsubs_wh = temp_arrays(mean_tsub_wh, 0) #WH index Tsub
+
+def moc_arrays(moc_array, start):
+    moc_all = moc_array[start:2205]
+    moc_LGM = moc_array[start:300]
+    moc_H1 = moc_array[300:750]
+    moc_BA = moc_array[750:900]
+    moc_YD = moc_array[900:1030]
+    moc_EMH = moc_array[1030:1800]
+    moc_LH = moc_array[1800:2205]
+    return moc_all, moc_LGM, moc_H1, moc_BA, moc_YD, moc_EMH, moc_LH
+
+# AMOC indices
+mocs1 = moc_arrays(moc_array1, 0) 
+mocs2 = moc_arrays(moc_array2, 0)
+mocs3 = moc_arrays(moc_array3, 0)    
+
+#-------------------------------------------------------------------------------
+def timeseries_plot(temps, mocs, label):
+    
+    '''
+    Plots full time series of temperature and AMOC on the same plot,
+    split up by time period.
+    
+    Parameters
+    -----------
+    temps: the temperature variable.
+    mocs: the AMOC variable.
+    label: y-axis label (string).
+    
+    Returns
+    -------
+    Nothing
+
+    '''
+
+    fig = plt.figure(figsize=(8, 11))
+
+    color1= '#B22222'
+    color2= '#4169E1'
+
+    for temp, moc, time, title, letter, num in zip(temps[1:], 
+                                                   mocs[1:], 
+                                                   times[1:], 
+                                                   title_list,
+                                                   letter_list,
+                                                   range(1,7)):
+
+        ax1 = fig.add_subplot(6, 1, num)
+
+        ax1.plot(time, temp, color=color1)
+        if num == 6:
+            ax1.set_xlabel('Time [ka]')
+        ax1.set_ylabel(label, color=color1)
+        ax1.tick_params(axis='y', labelcolor=color1)
+
+        ax2 = ax1.twinx()
+        ax2.set_ylabel('AMOC [Sv]', color=color2)
+        ax2.plot(time, moc, color=color2)
+        ax2.tick_params(axis='y', labelcolor=color2)
+        
+        plt.title(letter, loc='left', fontweight='bold')
+        plt.title(title, loc='center', fontweight='bold')
+        fig.tight_layout()
+        plt.rcParams.update({'font.size': 12})
+        plt.subplots_adjust(hspace=0.6)
+        
+#-------------------------------------------------------------------------------
+def regression(mocs, temps, dof_list, label, annotate_sst_NA, annotate_sst_WH,
+               annotate_tsub_NA, annotate_tsub_WH, t_test=True):
+    
+    '''
+    Creates a regression model that takes two variables and outputs the slope, 
+    intercept, r-value, p-value & standard error. Plots the two variables 
+    against each other with the fitted regression line. Annotates the plot 
+    by time. 
+    
+    Parameters
+    -----------
+    mocs: a tuple of AMOC variables.
+    temps: a tuple of temp variables.
+    dof_list: a list of DOF values.
+    label: y-axis label (string).
+    annotate_sst_NA: T/F
+    annotate_sst_WH: T/F
+    annotate_tsub_NA: T/F
+    annotate_tsub_WH: T/F
+    t_test: default is True, conduct a t-test, adjusted for autocorrelation.
+    
+    Returns
+    -------
+    Nothing
+
+    '''
+    
+    fig = plt.figure(figsize=(12, 5.5))
+
+    for moc, temp, dof, title, letter, num in zip(mocs[1:],
+                                                  temps[1:], 
+                                                  dof_list,
+                                                  title_list,
+                                                  letter_list,
+                                                  range(1,7)):
+    
+        ax = fig.add_subplot(2, 3, num)
+        '''slope, intercept, r_value, p_value, std_err = stats.linregress(moc,temp)
+
+        if t_test:
+            # t-test for p-value adjusted for autocorrelation
+            t_score = (r_value * np.sqrt(dof)) / np.sqrt(1-r_value**2)
+            pval = stats.t.sf(np.abs(t_score), dof)*2 
+
+            plt.plot(moc, intercept + slope*moc, 
+                 color='red', label = f"$r^2=%.2f$, p=%.0E"%(r_value**2, 
+                                                             Decimal(pval)))
+        else: #un-adjusted
+            plt.plot(moc, intercept + slope*moc, 
+                 color='red', label = f"$r^2=%.2f$, p=%.0E"%(r_value**2, 
+                                                             Decimal(p_value)))
+            
+        #print("slope ", slope, "intercept ", intercept, 
+        #      "r_value ", r_value**2, "p ", pval, "se", std_err*1.96, "\n")
+
+        plt.scatter(moc, temp, color='k')
+        plt.legend(loc='best')
+        '''
+        if num==4 or num==5 or num==6:
+            plt.xlabel('AMOC [Sv]')
+        if num==1 or num==4:
+            plt.ylabel(label)
+            
+        #annotate
+        '''box_props = dict(boxstyle='round', fc='lightskyblue', ec='lightskyblue')
+        if num==2:
+            if annotate_sst_NA:
+                ax.text(7.5, 4.05, '-14.5', bbox=box_props, fontsize=10)
+                ax.text(2, 3.65, '-15', bbox=box_props, fontsize=10)
+                ax.text(2.7, 3.31, '-17', bbox=box_props, fontsize=10)
+                ax.text(6, 3.5, '-18', bbox=box_props, fontsize=10)
+            if annotate_sst_WH:
+                ax.text(7.2, 0.8, '-14.5', bbox=box_props, fontsize=10)
+                ax.text(2.3, 0.05, '-15', bbox=box_props, fontsize=10)
+                ax.text(4.5, -0.1, '-17.5', bbox=box_props, fontsize=10)
+                ax.text(7.8, 0.2, '-19', bbox=box_props, fontsize=10)
+            if annotate_tsub_NA:
+                ax.text(7, 2.1, '-14.5', bbox=box_props, fontsize=10)
+                ax.text(2.2, 1.95, '-15', bbox=box_props, fontsize=10)
+                ax.text(2.5, 1.6, '-17', bbox=box_props, fontsize=10)
+                ax.text(6.5, 1.61, '-18.5', bbox=box_props, fontsize=10)
+            if annotate_tsub_WH:
+                ax.text(7, 0.5, '-14.5', bbox=box_props, fontsize=10)
+                ax.text(2.1, 0.78, '-15', bbox=box_props, fontsize=10)
+                ax.text(6.1, 0.1, '-18.5', bbox=box_props, fontsize=10)
+        if num==3:
+            if annotate_tsub_NA:
+                ax.text(5.5, 2.4, '-13', bbox=box_props, fontsize=10)
+                ax.text(13, 2.0, '-14.3', bbox=box_props, fontsize=10)
+                ax.text(7.5, 2.1, '-14.5', bbox=box_props, fontsize=10)
+            if annotate_tsub_WH:
+                ax.text(5.8, 1.2, '-13', bbox=box_props, fontsize=10)
+                ax.text(2, 0.5, '-13.9', bbox=box_props, fontsize=10)
+                ax.text(13, 0.85, '-14.3', bbox=box_props, fontsize=10)'''
+
+        plt.title(letter, loc='left', fontweight='bold')
+        plt.title(title, loc='center', fontweight='bold' )
+        fig.tight_layout()
+        plt.rcParams.update({'font.size': 12})
+        plt.subplots_adjust(wspace=0.2, hspace=0.45)
+        
+#-------------------------------------------------------------------------------
+def low_high_filter(order, crit_freq, filter_name, var, axis=0):
+    
+    '''
+    Designs an Nth-order digital or analog Butterworth filter & plots
+    the new signal. Returns sos (second-order sections representation
+    of the filter)
+    
+    Parameters
+    -----------
+    
+    order: order of the filter.
+    
+    crit_freq: cutoff frequency, specified as a scalar between 0 and 1 
+    for digital filters. The cutoff frequency is the frequency at which 
+    the magnitude response of the filter is 1 / √2.
+    0.1 = every 10th data point = 10*decades = cutoff freq 100 yrs. 
+    
+    filter_name: hp or lp.
+    
+    var: moc or temp.
+    
+    Returns
+    -------
+    
+    filtered: ndarray, second-order sections representation of filter.
+    
+    '''
+    
+    sos = signal.butter(order, crit_freq, filter_name, output='sos')
+    filtered = signal.sosfilt(sos, var, axis)
+        
+    return filtered    
+    
+#-------------------------------------------------------------------------------
+def regress(tempv, mocv, min_time, max_time, verbose=True):
+
+    # Weight T by grid-box size
+    temp_weight = (tempv[min_time:max_time]*tarea)/tarea
+
+    # Empty arrays for stats
+    slopes = np.empty((116, 100))
+    intercepts = np.empty((116, 100))
+    rs = np.empty((116, 100))
+    ps = np.empty((116, 100))
+    std_errs = np.empty((116, 100))
+
+    # Loop through lats & lons
+    for nlat in range(temp_weight.shape[1]):
+        for nlon in range(temp_weight.shape[2]):
+            
+            temp=temp_weight[:,nlat,nlon] 
+            moc=mocv[min_time:max_time]
+            
+            slope, intercept, r_value, \
+            p_value, std_err = stats.linregress(moc,temp)
+            
+            # Put stats into empty arrays in same place as original temp
+            slopes[nlat,nlon]=slope
+            intercepts[nlat,nlon]=intercept
+            rs[nlat,nlon]=r_value
+            ps[nlat,nlon]=p_value #un-adjusted
+            std_errs[nlat,nlon]=std_err  
+    
+    if verbose:
+        # Convert nan values to numbers for plotting
+        slopes=np.nan_to_num(slopes)
+        rs=np.nan_to_num(rs)
+    
+    return slopes, rs, ps
+    
+def get_stats(start, temps, mocs):
+    
+    slopes_all, rs_all, ps_all = regress(temps, mocs, start, 2205)
+    slopes_LGM, rs_LGM, ps_LGM = regress(temps, mocs, start, 300)
+    slopes_H1, rs_H1, ps_H1 = regress(temps, mocs, 300, 750)
+    slopes_BA, rs_BA, ps_BA = regress(temps, mocs, 750, 900)
+    slopes_YD, rs_YD, ps_YD = regress(temps, mocs, 900, 1030)
+    slopes_EMH, rs_EMH, ps_EMH = regress(temps, mocs, 1030, 1800)
+    slopes_LH, rs_LH, ps_LH = regress(temps, mocs, 1800, 2205)
+    
+    slope_list = [slopes_all, slopes_LGM, slopes_H1, slopes_BA, slopes_YD, slopes_EMH, slopes_LH]
+    r_list = [rs_all, rs_LGM, rs_H1, rs_BA, rs_YD, rs_EMH, rs_LH]
+    p_list = [ps_all, ps_LGM, ps_H1, ps_BA, ps_YD, ps_EMH, ps_LH] # un-adjusted
+    
+    return slope_list, r_list, p_list
+    
+# Adjust for autocorrelation 
+def t_test(dof_list, rs):
+
+    t_list = []
+    adj_p_list = []
+
+    # ---t-statistic
+    for dof, r in zip(dof_list, rs):
+        t_score = (r * np.sqrt(dof)) / np.sqrt(1-r**2)
+        t_list.append(t_score)
+
+    # ---p-value
+    for t, dof in zip(t_list, dof_list):
+        pval = stats.t.sf(np.abs(t), dof)*2 
+        adj_p_list.append(pval)
+        
+    return adj_p_list
+
+adj_p_sst_list = t_test(sst_dof_list_all, sst_rs) #SST
+adj_p_tsub_list = t_test(tsub_dof_list_all, tsub_rs) #Tsub
+low_adj_p_sst_list = t_test(sst_dof_list, l_sst_rs) #filtered SST
+low_adj_p_tsub_list = t_test(tsub_dof_list, l_tsub_rs) #filtered Tsub
+
+# Rename lat & lon variables so regridder can find them
+temp_data_xr = temp_data_xr.rename({'TLONG': 'lon', 'TLAT': 'lat'})
+moc_data_xr = moc_data_xr.rename({'TLONG': 'lon', 'TLAT': 'lat'})
+
+#-------------------------------------------------------------------------------
+# Make 1x1 grid
+grid_out = xe.util.grid_global(1, 1)
+
+# Make regridder: 1st argument needs to be xarray dataset 
+regridder = xe.Regridder(temp_data_xr, grid_out, 'nearest_s2d',
+                              reuse_weights=True)
+
+# Regrid 116x100 grids to 180x360 grids
+lats = regridder(lats_xr)
+lons = regridder(lons_xr)
+
+#-------------------------------------------------------------------------------
+def regrid(slopes, rs, ps, adj_ps, verbose=True):
+    sgrid_list = [regridder(slope) for slope in slopes]
+    rgrid_list = [regridder(r) for r in rs]
+    pgrid_list = [regridder(p) for p in ps] # un-adjusted
+    
+    # regrid adjusted p values
+    if verbose:
+        adj_pgrid_list = [regridder(p) for p in adj_ps]
+        return sgrid_list, rgrid_list, pgrid_list, adj_pgrid_list
+    else:
+        return sgrid_list, rgrid_list, pgrid_list
+        
+def format_plot(ax, num, fingerprint_format, eof_format):
+    
+    '''
+    Formats the fingerprint plots.
+    
+    Parameters
+    -----------
+    ax: the axis.
+    num: the plot number.
+    fingerprint_format: T/F, plot a 2x3 panel plot.
+    eof_format: T/F, plot a 1x2 panel plot. 
+
+    
+    Returns
+    -------
+    Nothing
+
+    '''
+    
+    ax.add_feature(cfeature.NaturalEarthFeature('physical', 
+                                                'land', 
+                                                '110m',
+                                                facecolor='gray'))
+    
+    ax.set_extent([-100, 30, 0, 80])
+    ax.set_aspect('auto')
+    ax.coastlines()
+
+    gl = ax.gridlines(crs=ccrs.PlateCarree(),
+                      draw_labels=True, 
+                      alpha=0.0,
+                      linestyle='--')
+    
+    #---------------------------------------------------------------------------
+    # ---only plot labels around edges
+    gl.xlabels_top=False
+    gl.ylabels_right=False 
+    
+    # Fingerprints
+    if fingerprint_format==True:
+        if num==1 or num==2 or num==3:
+            gl.xlabels_bottom=False
+        if num==2 or num==3 or num==5 or num==6:
+            gl.ylabels_left=False 
+        gl.xlocator = mticker.FixedLocator([-90, -60, -30, 0, 15])
+    
+    # EOFs
+    elif eof_format==True:
+        gl.xlabels_bottom=True
+        gl.xlocator = mticker.FixedLocator([-120, -60, 0, 60, 120])
+        if num==2:
+            gl.ylabels_left=False 
+    
+    # Filtered plots
+    else:
+        gl.xlocator = mticker.FixedLocator([-90, -60, -30, 0, 15])
+        if num==1 or num==2:
+            gl.xlabels_bottom=False
+        if num==2 or num==4:
+            gl.ylabels_left=False 
+    #---------------------------------------------------------------------------
+            
+    gl.xformatter = LONGITUDE_FORMATTER
+    gl.yformatter = LATITUDE_FORMATTER
+    plt.rcParams.update({'font.size': 12})
+    plt.tight_layout()
+    
+#-------------------------------------------------------------------------------
+def plot_map(grid_list, pgrid_list, vmin, vmax, hatch):
+    
+    '''
+    Plots 2x3 maps. 
+    
+    Parameters
+    -----------
+    grid_list: the gradient or correlation-coefficient list of grids.
+    pgrid_list: the list of grids of p-values.
+    vmin: the minimum  for the colour range.
+    vmax: the maximum for the colour range.
+    hatch: plot the non-significant areas in white.
+
+    
+    Returns
+    -------
+    Nothing
+
+    '''
+    
+    fig = plt.figure(figsize=(28,6))
+    for grid, pgrid, title, letter, num in zip(grid_list[1:], 
+                                               pgrid_list[1:],
+                                               title_list, 
+                                               letter_list, 
+                                               range(1,7)):
+        ax = fig.add_subplot(2, 3, num, 
+                                 projection=ccrs.PlateCarree(central_longitude=0.0))
+
+        cm = plt.pcolormesh(lons, lats, grid,
+                            vmin=vmin, vmax=vmax,
+                            cmap='coolwarm',
+                            transform=ccrs.PlateCarree())
+
+        if hatch==True: #significance 
+            plt.pcolormesh(lons, lats, pgrid,
+                           cmap=c.ListedColormap(['w']),
+                           transform=ccrs.PlateCarree())
+
+        plt.title(letter, loc='left', fontweight='bold', fontsize='large')
+        plt.title(title, loc='center', fontsize='large') 
+        
+        format_plot(ax, num, fingerprint_format=True, eof_format=False)
+        plt.subplots_adjust(left=0.2, right=0.5, wspace=0.05, hspace=0.2)
+        
+    cbar_ax = fig.add_axes([0.51, 0.24, 0.01, 0.5]) #left, bottom, width, height
+    cbar = plt.colorbar(cm, cax=cbar_ax, orientation="vertical", pad=0.05)    
+    
+def eof(lats, temp_array):
+    
+    '''
+    weights: sqrt of cosine of latitude weights.
+    center: default True for anomalies, time-mean removed before analysis.
+    ddof: DOF used in normalising covariance matrix.
+
+    '''
+    
+    weights = np.sqrt(np.cos(np.deg2rad(lats)))
+    solver = Eof(temp_array, weights)
+
+    # EOFs as correlation between each PC & input data
+    eofs_as_corr = solver.eofsAsCorrelation(neofs=2)
+    # EOFs as covariance between each PC & input data
+    eofs_as_cov = solver.eofsAsCovariance(neofs=2)
+
+    # Fractions of total variance accounted for by each EOF mode
+    varianceF = solver.varianceFraction(neigs=2)
+
+    # Typical errors associated w/ each EV using North's rule of thumb
+    eigs = solver.eigenvalues(neigs=2)
+    northT = solver.northTest(neigs=2)
+
+    # PC time series
+    pcs = solver.pcs(npcs=2, pcscaling=1)
+    
+    return eofs_as_corr, eofs_as_cov, varianceF, eigs, northT, pcs
